@@ -30,6 +30,7 @@ import requests
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List
 
 OUTPUT_FILE = Path("latest_picks.csv")
@@ -95,7 +96,13 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 def tomorrow_date() -> str:
-    return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    """
+    Uses Eastern Time so GitHub Actions UTC time does not skip the slate date.
+    Example: if it is late Apr 28 in Eastern time, target remains Apr 29,
+    even if GitHub's server is already on Apr 29 UTC.
+    """
+    eastern_now = datetime.now(ZoneInfo("America/New_York"))
+    return (eastern_now + timedelta(days=1)).strftime("%Y-%m-%d")
 
 def api_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Dict[str, Any]:
     try:
