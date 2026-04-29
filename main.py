@@ -267,6 +267,82 @@ def get_player_season_stats(player_id: int, season: int) -> Dict[str, Any]:
         return {}
     return splits[0].get("stat", {}) or {}
 
+def get_last_5_hr_games(player_id: int, season: int, target_date: str) -> Dict[str, Any]:
+    """
+    Pull hitter game logs and return the last 5 games where the player hit a HR.
+    Safe fallback returns empty history if MLB API has no log data.
+    """
+    data = api_get(
+        f"{MLB_API_BASE}/people/{player_id}/stats",
+        {"stats": "gameLog", "group": "hitting", "season": season},
+    )
+
+    stats_list = data.get("stats", [])
+    if not stats_list:
+        return {"last_5_hr_games": "No HR game log found", "last_5_hr_count": 0, "last_hr_days_ago": "N/A"}
+
+    splits = stats_list[0].get("splits", [])
+    if not splits:
+        return {"last_5_hr_games": "No HR game log found", "last_5_hr_count": 0, "last_hr_days_ago": "N/A"}
+
+    try:
+        target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+    except Exception:
+        target_dt = datetime.now(ZoneInfo("America/New_York")).date()
+
+    hr_games = []
+
+    for s in splits:
+        stat = s.get("stat", {}) or {}
+        hr = safe_float(stat.get("homeRuns", 0), 0)
+        if hr <= 0:
+            continue
+
+        date_raw = s.get("date", "")
+        opponent = s.get("opponent", {}).get("name", "Opponent")
+        try:
+            game_dt = datetime.strptime(date_raw, "%Y-%m-%d").date()
+            days_ago = max(0, (target_dt - game_dt).days)
+            date_label = game_dt.strftime("%b %d")
+        except Exception:
+            days_ago = "N/A"
+            date_label = date_raw or "Unknown"
+
+        hr_games.append({
+            "date": date_raw,
+            "date_label": date_label,
+            "opponent": opponent,
+            "hr": int(hr),
+            "days_ago": days_ago,
+        })
+
+    # Game logs are usually reverse chronological, but sort safely.
+    def sort_key(x):
+        return x.get("date", "")
+
+    hr_games = sorted(hr_games, key=sort_key, reverse=True)[:5]
+
+    if not hr_games:
+        return {"last_5_hr_games": "No HR yet this season", "last_5_hr_count": 0, "last_hr_days_ago": "N/A"}
+
+    parts = []
+    for g in hr_games:
+        if g["days_ago"] == "N/A":
+            ago = "N/A"
+        elif g["days_ago"] == 0:
+            ago = "today"
+        elif g["days_ago"] == 1:
+            ago = "1 day ago"
+        else:
+            ago = f"{g['days_ago']} days ago"
+        parts.append(f"{g['date_label']} vs {g['opponent']}: {g['hr']} HR ({ago})")
+
+    return {
+        "last_5_hr_games": " | ".join(parts),
+        "last_5_hr_count": int(sum(g["hr"] for g in hr_games)),
+        "last_hr_days_ago": hr_games[0]["days_ago"],
+    }
+
 def get_pitcher_season_stats(player_id: Optional[int], season: int) -> Dict[str, Any]:
     if not player_id:
         return {}
@@ -700,6 +776,7 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
 
                 pwr = power_score(stats)
                 statcast_extra = optional_statcast_power(player["player"], statcast_cache)
+                last_hr_data = get_last_5_hr_games(pid, season, date)
 
                 # If real Statcast exists, blend into power score.
                 if statcast_extra:
@@ -727,6 +804,7 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                     "slg": round(slg, 3),
                     "hr_rate": hrrate,
                     "statcast_extra": statcast_extra,
+                    "last_hr_data": last_hr_data,
                 })
 
                 time.sleep(REQUEST_SLEEP)
@@ -750,6 +828,16 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                 statcast_source = "Real Statcast" if sc else "Proxy"
 
                 recent_power_proxy = clamp(55 + cand["hr_rate"] * 850, 45, 90)
+
+                last_hr_days = cand.get("last_hr_data", {}).get("last_hr_days_ago", "N/A")
+                last_hr_recency_boost = 0
+                if isinstance(last_hr_days, int):
+                    if last_hr_days <= 3:
+                        last_hr_recency_boost = 4
+                    elif last_hr_days <= 7:
+                        last_hr_recency_boost = 2
+                    elif last_hr_days >= 21:
+                        last_hr_recency_boost = -2
 
                 pitch_match = pitch_type_matchup_score(
                     cand["bat_side"],
@@ -779,7 +867,8 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                     recent_power_proxy * 0.09 +
                     pitch_match["pitch_matchup_score"] * 0.09 +
                     70 * 0.03 +
-                    split_bonus
+                    split_bonus +
+                    last_hr_recency_boost
                 )
 
                 rating = round(clamp(rating, 1, 99), 1)
@@ -822,6 +911,7 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                     f"{p_label}; {weather['weather_boost']}; "
                     f"{weather['wind_label']}; "
                     f"{pitch_match['pitch_matchup']}; "
+                    f"recent HR log: {cand.get('last_hr_data', {}).get('last_5_hr_games', 'N/A')}; "
                     f"{hand_split_note(cand['bat_side'], pitcher_hand)}."
                 )
 
@@ -870,6 +960,9 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                     "launch_angle": launch_angle,
                     "max_ev": max_ev,
                     "statcast_source": statcast_source,
+                    "last_5_hr_games": cand.get("last_hr_data", {}).get("last_5_hr_games", "N/A"),
+                    "last_5_hr_count": cand.get("last_hr_data", {}).get("last_5_hr_count", 0),
+                    "last_hr_days_ago": cand.get("last_hr_data", {}).get("last_hr_days_ago", "N/A"),
                     "iso": cand["iso"],
                     "slg": cand["slg"],
                     "pull_rate": pull_rate,
@@ -939,7 +1032,7 @@ def main():
             "opposing_pitcher", "pitcher", "pitcher_hand", "batter_hand",
             "lineup_spot", "starter_confirmed", "hr_probability", "real_hr_probability", "probability",
             "rating", "smart_rank_score", "edge", "barrel_rate", "hard_hit_rate", "fly_ball_rate",
-            "exit_velocity", "launch_angle", "max_ev", "statcast_source", "iso", "slg", "pull_rate",
+            "exit_velocity", "launch_angle", "max_ev", "statcast_source", "last_5_hr_games", "last_5_hr_count", "last_hr_days_ago", "iso", "slg", "pull_rate",
             "pitcher_hr9", "pitcher_barrel_allowed", "primary_pitch", "pitch_matchup", "pitch_matchup_score",
             "park", "park_factor", "park_score", "weather_boost", "weather",
             "weather_score", "wind_label", "wind_score", "wind_boost", "wind_direction",
