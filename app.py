@@ -17,9 +17,11 @@ Features:
 from pathlib import Path
 from datetime import datetime, timezone
 import base64
+import json
 import math
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(
@@ -251,6 +253,7 @@ pitch_matchup_col = find_col("pitch_matchup", "pitch_type_matchup")
 last_5_hr_col = find_col("last_5_hr_games", "last_hr_games")
 last_5_hr_count_col = find_col("last_5_hr_count", "recent_hr_count")
 last_hr_days_col = find_col("last_hr_days_ago", "last_hr_days")
+recent_hr_chart_col = find_col("recent_hr_chart_data", "hr_chart_data")
 
 if player_col is None:
     st.error("CSV needs a player column.")
@@ -503,6 +506,61 @@ def game_status_badge(row):
         return "🟢 LIVE"
 
     return "⚫ Final"
+
+
+def get_recent_hr_chart_df(row):
+    raw = safe(row, recent_hr_chart_col, "[]")
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            return pd.DataFrame()
+        return pd.DataFrame(data)
+    except Exception:
+        return pd.DataFrame()
+
+def render_recent_hr_chart(row):
+    chart_df = get_recent_hr_chart_df(row)
+    if chart_df.empty or "HR" not in chart_df.columns:
+        st.info("No recent game-log chart data found for this player yet.")
+        return
+
+    chart_df["HR"] = pd.to_numeric(chart_df["HR"], errors="coerce").fillna(0)
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=chart_df["Game"],
+        y=chart_df["HR"],
+        customdata=chart_df[["Date", "Opponent", "Days Ago"]] if all(c in chart_df.columns for c in ["Date", "Opponent", "Days Ago"]) else None,
+        hovertemplate="<b>%{customdata[0]}</b><br>Opponent: %{customdata[1]}<br>HR: %{y}<br>Days ago: %{customdata[2]}<extra></extra>",
+        marker=dict(
+            color=chart_df["HR"],
+            colorscale=[[0, "rgba(148,163,184,0.20)"], [0.5, "rgba(34,197,94,0.85)"], [1, "rgba(132,204,22,1)"]],
+            line=dict(width=0),
+        ),
+        name="Home Runs",
+    ))
+
+    fig.add_hline(
+        y=0.5,
+        line_width=2,
+        line_color="rgba(148,163,184,0.65)",
+    )
+
+    fig.update_layout(
+        height=300,
+        margin=dict(l=20, r=20, t=20, b=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e5e7eb", size=11),
+        xaxis=dict(showgrid=False, tickangle=0),
+        yaxis=dict(showgrid=True, gridcolor="rgba(148,163,184,0.16)", rangemode="tozero", dtick=1),
+        bargap=0.45,
+        hoverlabel=dict(bgcolor="#111827", font_size=13),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
 
 def recent_hr_summary(row):
     count = safe(row, last_5_hr_count_col, 0)
@@ -763,6 +821,7 @@ with st.container(border=True):
     with r3:
         st.markdown("### Last 5 Home Runs")
         st.info(safe(selected, last_5_hr_col, "No HR game log found"))
+        render_recent_hr_chart(selected)
 
         st.markdown("### Why He Can Homer")
 
