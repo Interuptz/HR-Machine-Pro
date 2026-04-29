@@ -226,7 +226,9 @@ temp_col = find_col("temperature")
 hand_col = find_col("batter_hand")
 pitcher_hand_col = find_col("pitcher_hand")
 game_col = find_col("game")
-date_col = find_col("date", "game_date", "target_date", "slate_date", "props_date")
+game_date_display_col = find_col("game_date_display", "date", "game_date")
+game_time_col = find_col("game_time_et", "game_time", "start_time")
+game_day_col = find_col("game_day", "day")
 pitch_mix_col = find_col("pitch_mix", "primary_pitch", "pitcher_primary_pitch")
 pitch_matchup_col = find_col("pitch_matchup", "pitch_type_matchup")
 
@@ -272,30 +274,6 @@ def display_pct(value):
         x *= 100
     return f"{x:.1f}%"
 
-
-def slate_date_info():
-    """Return readable slate date and stale warning for latest_picks.csv."""
-    if date_col and date_col in df.columns and len(df):
-        dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
-        if not dates.empty:
-            slate_date = dates.max().date()
-            today = pd.Timestamp.now().date()
-            delta = (slate_date - today).days
-
-            if delta < 0:
-                status = f"⚠️ STALE DATA — slate is {slate_date.strftime('%b %d, %Y')}"
-            elif delta == 0:
-                status = f"✅ TODAY'S SLATE — {slate_date.strftime('%b %d, %Y')}"
-            elif delta == 1:
-                status = f"✅ TOMORROW'S SLATE — {slate_date.strftime('%b %d, %Y')}"
-            else:
-                status = f"📅 FUTURE SLATE — {slate_date.strftime('%b %d, %Y')}"
-
-            return slate_date.strftime("%b %d, %Y"), status
-
-    modified = datetime.fromtimestamp(CSV_FILE.stat().st_mtime).strftime("%b %d, %Y %I:%M %p") if CSV_FILE.exists() else "Unknown"
-    return "Unknown", f"⚠️ No slate date column found • CSV modified {modified}"
-
 def conf_label(score_value):
     score = to_float(score_value, 0)
     if score >= 90:
@@ -326,6 +304,13 @@ def profile_tag(score_value, risk):
     if score < 72:
         return "💣 LONGSHOT", "tag-longshot"
     return "✅ STRONG LOOK", "tag-watch"
+
+
+def game_time_text(row):
+    day = safe(row, game_day_col, "TBD")
+    date = safe(row, game_date_display_col, "TBD")
+    time = safe(row, game_time_col, "TBD")
+    return f"{day} • {date} • {time}"
 
 def wind_impact(row):
     speed = to_float(safe(row, wind_col, 0), 0)
@@ -426,7 +411,6 @@ def split_text(text, fallback):
 df["_adjusted_strength"] = df.apply(adjusted_strength, axis=1)
 df["_real_hr_prob"] = df["_adjusted_strength"].apply(true_hr_probability_from_strength)
 df["_profile_label"] = df.apply(lambda r: profile_tag(r["_adjusted_strength"], safe(r, risk_col, "N/A"))[0], axis=1)
-slate_date_display, slate_status = slate_date_info()
 
 # =========================================================
 # HEADER
@@ -443,23 +427,7 @@ with header_left:
 with header_right:
     st.write("")
     st.write("")
-    st.success(f"{slate_status} • App refreshed {datetime.now().strftime('%I:%M %p')}")
-
-
-# =========================================================
-# DATA QUALITY / ACCURACY NOTICE
-# =========================================================
-with st.container(border=True):
-    q1, q2, q3, q4 = st.columns(4)
-    q1.metric("Props Date", slate_date_display)
-    q2.metric("Weather Source", "Forecast/Estimate")
-    q3.metric("HR% Type", "Model Estimate")
-    q4.metric("Strength Type", "0-100 Score")
-    st.caption(
-        "Accuracy note: HR Probability is a model estimate, not a guarantee. "
-        "Weather is only as accurate as the forecast data in latest_picks.csv. "
-        "Power and pitcher values are strongest when main.py has fresh Statcast/split data; otherwise they use safe model proxies."
-    )
+    st.success(f"Model Active • Updated {datetime.now().strftime('%I:%M %p')}")
 
 # =========================================================
 # FILTERS
@@ -532,7 +500,7 @@ for i, (_, row) in enumerate(filtered.head(5).iterrows()):
             st.caption(f"#{i+1} TARGET • {tag}")
             st.markdown(f"### {safe(row, player_col)}")
             st.caption(f"{safe(row, team_col, 'MLB')} vs {safe(row, pitcher_col, 'Projected Starter')}")
-            st.caption(f"Slate: {safe(row, date_col, slate_date_display)}")
+            st.caption(f"🕒 {game_time_text(row)}")
             st.metric("Real HR Probability", f"{row['_real_hr_prob']}%")
             st.write(f"**Strength:** {strength}/100")
             st.progress(int(max(0, min(100, strength))))
@@ -595,12 +563,12 @@ for _, row in display_df.iterrows():
             st.write(f"### {risk_emoji(risk)}")
 
         with c[8]:
+            st.write(f"**Game Time:** {game_time_text(row)}")
             st.write(f"**Pitcher:** {safe(row, pitcher_col, 'Projected Starter')}")
             st.write(f"**Park:** {safe(row, park_col, 'Neutral')}")
             st.write(f"**Weather:** {safe(row, weather_col, 'Neutral')}")
             st.write(f"**Wind/Temp:** {safe(row, wind_col, 'N/A')} mph • {safe(row, temp_col, 'N/A')}°")
             st.write(f"**Lineup:** {safe(row, lineup_col, 'Projected')}")
-            st.write(f"**Slate Date:** {safe(row, date_col, slate_date_display)}")
 
         st.progress(int(max(0, min(100, strength))))
 
@@ -625,7 +593,7 @@ with st.container(border=True):
         st.image(get_image(selected), width=165)
         st.markdown(f"## {safe(selected, player_col)}")
         st.caption(f"{safe(selected, team_col, 'MLB')} • {safe(selected, pos_col, 'BAT')} • Bat: {safe(selected, hand_col, 'Unknown')}")
-        st.caption(f"Slate Date: {safe(selected, date_col, slate_date_display)}")
+        st.caption(f"🕒 Plays: {game_time_text(selected)}")
         st.write(selected_tag)
         st.metric("Real HR Probability", f"{selected_prob}%")
         st.metric("Strength Score", f"{selected_strength}/100")
