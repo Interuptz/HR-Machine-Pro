@@ -165,6 +165,21 @@ div[role="progressbar"] > div {
     color: #bae6fd;
     font-weight: 950;
 }
+.live-glow {
+    color: #86efac;
+    font-weight: 950;
+    text-shadow: 0 0 12px rgba(34,197,94,.35);
+}
+.timer-pill {
+    display: inline-block;
+    padding: 5px 9px;
+    border-radius: 999px;
+    background: rgba(168,85,247,.14);
+    border: 1px solid rgba(168,85,247,.35);
+    color: #ddd6fe;
+    font-size: 12px;
+    font-weight: 850;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -233,6 +248,9 @@ slate_type_col = find_col("slate_type", "slate")
 game_datetime_utc_col = find_col("game_datetime_utc", "game_datetime", "start_datetime")
 pitch_mix_col = find_col("pitch_mix", "primary_pitch", "pitcher_primary_pitch")
 pitch_matchup_col = find_col("pitch_matchup", "pitch_type_matchup")
+last_5_hr_col = find_col("last_5_hr_games", "last_hr_games")
+last_5_hr_count_col = find_col("last_5_hr_count", "recent_hr_count")
+last_hr_days_col = find_col("last_hr_days_ago", "last_hr_days")
 
 if player_col is None:
     st.error("CSV needs a player column.")
@@ -467,6 +485,41 @@ def countdown_text(row):
         return "Live / In Progress"
     return "Final / Completed"
 
+
+def game_status_badge(row):
+    dt = parse_game_datetime(row)
+    if dt is None:
+        return "⚪ TBD"
+
+    now = datetime.now(timezone.utc)
+    diff = (dt - now).total_seconds()
+
+    if diff > 0:
+        if diff <= 60 * 60:
+            return "🟡 Starting Soon"
+        return "🟣 Upcoming"
+
+    if abs(diff) <= 4.5 * 3600:
+        return "🟢 LIVE"
+
+    return "⚫ Final"
+
+def recent_hr_summary(row):
+    count = safe(row, last_5_hr_count_col, 0)
+    days = safe(row, last_hr_days_col, "N/A")
+    if str(count) == "0":
+        return "Last 5 HR: none logged"
+    if str(days) == "0":
+        ago = "last HR today"
+    elif str(days) == "1":
+        ago = "last HR 1 day ago"
+    elif str(days) == "N/A":
+        ago = "last HR date N/A"
+    else:
+        ago = f"last HR {days} days ago"
+    return f"Last 5 HR total: {count} • {ago}"
+
+
 def slate_status_text(dataframe):
     if dataframe.empty:
         return "No games found"
@@ -588,6 +641,8 @@ for i, (_, row) in enumerate(filtered.head(5).iterrows()):
             st.markdown(f"### {safe(row, player_col)}")
             st.caption(f"{safe(row, team_col, 'MLB')} vs {safe(row, pitcher_col, 'Projected Starter')}")
             st.caption(f"🕒 {safe(row, game_day_col, 'TBD')} • {safe(row, game_date_display_col, 'TBD')} • {safe(row, game_time_col, 'TBD')}")
+            st.caption(game_status_badge(row))
+            st.caption(recent_hr_summary(row))
             st.metric("Real HR Probability", f"{row['_real_hr_prob']}%")
             st.write(f"**Strength:** {strength}/100")
             st.progress(int(max(0, min(100, strength))))
@@ -651,6 +706,8 @@ for _, row in display_df.iterrows():
 
         with c[8]:
             st.write(f"**Game Time:** {safe(row, game_day_col, 'TBD')} • {safe(row, game_date_display_col, 'TBD')} • {safe(row, game_time_col, 'TBD')}")
+            st.write(f"**Status:** {game_status_badge(row)}")
+            st.write(f"**Recent HR:** {recent_hr_summary(row)}")
             st.write(f"**Pitcher:** {safe(row, pitcher_col, 'Projected Starter')}")
             st.write(f"**Park:** {safe(row, park_col, 'Neutral')}")
             st.write(f"**Weather:** {safe(row, weather_col, 'Neutral')}")
@@ -704,6 +761,9 @@ with st.container(border=True):
             st.caption(note)
 
     with r3:
+        st.markdown("### Last 5 Home Runs")
+        st.info(safe(selected, last_5_hr_col, "No HR game log found"))
+
         st.markdown("### Why He Can Homer")
 
         homer_fallback = (
