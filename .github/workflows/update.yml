@@ -28,13 +28,13 @@ jobs:
         run: python main.py
 
       - name: Commit new data
-  run: |
-    git config --global user.name "hr-machine-bot"
-    git config --global user.email "hr-machine-bot@users.noreply.github.com"
+        run: |
+          git config --global user.name "hr-machine-bot"
+          git config --global user.email "hr-machine-bot@users.noreply.github.com"
 
-    git pull --rebase
+          git pull --rebase
 
-    git add latest_picks.csv
-    git commit -m "Auto update HR picks" || echo "No changes to commit"
+          git add latest_picks.csv
+          git commit -m "Auto update HR picks" || echo "No changes to commit"
 
-    git push
+          git push
