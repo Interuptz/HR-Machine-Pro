@@ -162,6 +162,10 @@ def format_game_time(game_date_value: Any) -> Dict[str, str]:
             "game_day": "TBD",
         }
 
+def today_date() -> str:
+    eastern_now = datetime.now(ZoneInfo("America/New_York"))
+    return eastern_now.strftime("%Y-%m-%d")
+
 def tomorrow_date() -> str:
     eastern_now = datetime.now(ZoneInfo("America/New_York"))
     return (eastern_now + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -640,7 +644,7 @@ def pitch_type_matchup_score(batter_hand: str, pitcher_hand: str, pitcher_stats:
 # Build picks
 # =====================================================
 
-def build_candidate_rows(date: str) -> pd.DataFrame:
+def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
     season = datetime.now(ZoneInfo("America/New_York")).year
     statcast_cache = load_statcast_player_cache(season)
     games = get_schedule(date)
@@ -835,6 +839,7 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
 
                 rows.append({
                     "date": date,
+                    "slate_type": slate_type,
                     "game_date_display": game.get("game_date_display", date),
                     "game_time_et": game.get("game_time_et", "TBD"),
                     "game_day": game.get("game_day", "TBD"),
@@ -916,13 +921,21 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
 # =====================================================
 
 def main():
-    date = tomorrow_date()
-    print(f"[HR MACHINE] Building ELITE HR predictions V2 for {date}...")
-    picks = build_candidate_rows(date)
+    today = today_date()
+    tomorrow = tomorrow_date()
+
+    print(f"[HR MACHINE] Building TODAY slate for {today}...")
+    today_picks = build_candidate_rows(today, "TODAY")
+
+    print(f"[HR MACHINE] Building TOMORROW slate for {tomorrow}...")
+    tomorrow_picks = build_candidate_rows(tomorrow, "TOMORROW")
+
+    picks = pd.concat([today_picks, tomorrow_picks], ignore_index=True) if not today_picks.empty or not tomorrow_picks.empty else pd.DataFrame()
 
     if picks.empty:
         picks = pd.DataFrame(columns=[
-            "date", "game_date_display", "game_time_et", "game_day", "game_datetime_utc", "game", "player", "team", "position", "mlb_id", "prop", "line",
+            "date", "slate_type", "game_date_display", "game_time_et", "game_day", "game_datetime_utc",
+            "game", "player", "team", "position", "mlb_id", "prop", "line",
             "opposing_pitcher", "pitcher", "pitcher_hand", "batter_hand",
             "lineup_spot", "starter_confirmed", "hr_probability", "real_hr_probability", "probability",
             "rating", "smart_rank_score", "edge", "barrel_rate", "hard_hit_rate", "fly_ball_rate",
@@ -933,16 +946,22 @@ def main():
             "wind_speed", "temperature", "humidity", "confidence_score", "risk",
             "why_homer", "why_fail", "reason"
         ])
+    else:
+        # Preserve slate balance and ranking inside each slate.
+        sort_col = "smart_rank_score" if "smart_rank_score" in picks.columns else "confidence_score"
+        picks = picks.sort_values(["slate_type", sort_col], ascending=[True, False])
 
     picks.to_csv(OUTPUT_FILE, index=False)
     save_json(CACHE_FILE, CACHE)
-    save_json(STATCAST_CACHE_FILE, STATCAST_CACHE)
+    if "save_json" in globals() and "STATCAST_CACHE_FILE" in globals():
+        save_json(STATCAST_CACHE_FILE, STATCAST_CACHE)
 
     print(f"[HR MACHINE] Saved {len(picks)} HR picks to {OUTPUT_FILE.resolve()}")
 
     if len(picks):
-        print("\nTop 10 HR Targets:")
-        cols = ["player", "team", "opposing_pitcher", "hr_probability", "confidence_score", "smart_rank_score", "statcast_source", "risk"]
+        print("
+Top 10 HR Targets:")
+        cols = [c for c in ["slate_type", "date", "game_time_et", "player", "team", "opposing_pitcher", "hr_probability", "confidence_score", "smart_rank_score", "risk"] if c in picks.columns]
         print(picks[cols].head(10).to_string(index=False))
 
 if __name__ == "__main__":
