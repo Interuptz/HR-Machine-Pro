@@ -335,6 +335,12 @@ def game_time_text(row):
     time = safe(row, game_time_col, "TBD")
     return f"{day} • {date} • {time}"
 
+def game_time_full_text(row):
+    try:
+        return f"{game_time_text(row)} • {countdown_text(row)}"
+    except Exception:
+        return game_time_text(row)
+
 def wind_impact(row):
     speed = to_float(safe(row, wind_col, 0), 0)
     direction = str(safe(row, wind_dir_col, "Unknown")).lower()
@@ -618,7 +624,7 @@ with st.container(border=True):
     c0, c1, c2, c3, c4, c5 = st.columns([1.0, 1.55, 1.15, 1.0, 1.2, 1.0])
 
     with c0:
-        slate_view = st.selectbox("Slate", ["Today", "Tomorrow", "All"], index=1)
+        slate_view = st.selectbox("Slate", ["Today", "Tomorrow", "All"], index=2)
 
     with c1:
         search = st.text_input("Search Player", placeholder="Judge, Ohtani, Soto...")
@@ -636,7 +642,9 @@ with st.container(border=True):
         min_strength = st.slider("Min Strength Score", 0, 100, 50)
 
     with c5:
-        show_limit = st.selectbox("Show HR Props", [10, 25, 50, 75], index=1)
+        show_limit = st.selectbox("Show HR Props", [25, 50, 75, 100, 150, 250], index=1)
+
+    st.caption("Tip: Use All slate when searching for a specific player like Mike Trout.")
 
 # =========================================================
 # FILTER LOGIC
@@ -795,7 +803,7 @@ with st.container(border=True):
         st.image(get_image(selected), width=165)
         st.markdown(f"## {safe(selected, player_col)}")
         st.caption(f"{safe(selected, team_col, 'MLB')} • {safe(selected, pos_col, 'BAT')} • Bat: {safe(selected, hand_col, 'Unknown')}")
-        st.caption(f"🕒 Plays: {game_time_full_text(selected)}")
+        st.caption(f"🕒 Plays: {safe(selected, game_day_col, 'TBD')} • {safe(selected, game_date_display_col, 'TBD')} • {safe(selected, game_time_col, 'TBD')}")
         st.write(selected_tag)
         st.metric("Real HR Probability", f"{selected_prob}%")
         st.metric("Strength Score", f"{selected_strength}/100")
