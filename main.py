@@ -1,6 +1,6 @@
 
 """
-HR MACHINE PRO - ELITE MAIN ENGINE
+HR MACHINE PRO - ELITE MAIN ENGINE V2
 HR-only next-day prediction engine.
 
 Run:
@@ -14,12 +14,22 @@ Creates:
 
 Elite additions:
 - Eastern Time slate logic
-- Optional Statcast-style power engine using pybaseball if available
+- Real Statcast support when pybaseball is installed
+- Safe Statcast fallbacks so GitHub Actions will not break
 - Pitch-type matchup foundation
 - Wind direction + stadium orientation HR impact
 - Smarter top ranking
 - Team stacking control
 - Request/stat caching for faster runs
+
+Optional for REAL Statcast:
+    Add pybaseball to requirements.txt
+
+Recommended requirements.txt:
+    streamlit
+    pandas
+    requests
+    pybaseball
 """
 
 from __future__ import annotations
@@ -27,6 +37,7 @@ from __future__ import annotations
 import math
 import time
 import json
+import warnings
 import requests
 import pandas as pd
 from pathlib import Path
@@ -35,14 +46,20 @@ from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List
 from collections import defaultdict
 
+warnings.filterwarnings("ignore")
+
 OUTPUT_FILE = Path("latest_picks.csv")
 CACHE_FILE = Path("player_cache.json")
+STATCAST_CACHE_FILE = Path("statcast_cache.json")
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 MAX_PLAYERS_PER_TEAM = 8
 MAX_FINAL_PLAYERS_PER_TEAM = 2
 MAX_FINAL_ROWS = 150
 REQUEST_SLEEP = 0.01
+
+# Set to True. If pybaseball is not installed, it safely falls back.
+USE_REAL_STATCAST = True
 
 # =====================================================
 # Stadium coordinates + HR park factors + rough HR wind orientation
@@ -88,21 +105,22 @@ CONTROLLED_ROOF = {
 # Cache
 # =====================================================
 
-def load_cache() -> Dict[str, Any]:
-    if CACHE_FILE.exists():
+def load_json(path: Path) -> Dict[str, Any]:
+    if path.exists():
         try:
-            return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return {}
     return {}
 
-def save_cache(cache: Dict[str, Any]) -> None:
+def save_json(path: Path, data: Dict[str, Any]) -> None:
     try:
-        CACHE_FILE.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception:
         pass
 
-CACHE = load_cache()
+CACHE = load_json(CACHE_FILE)
+STATCAST_CACHE = load_json(STATCAST_CACHE_FILE)
 
 # =====================================================
 # Helpers
@@ -123,11 +141,12 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 def tomorrow_date() -> str:
-    """
-    Use Eastern Time so GitHub Actions UTC time does not skip the slate date.
-    """
     eastern_now = datetime.now(ZoneInfo("America/New_York"))
     return (eastern_now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+def days_ago_date(days: int) -> str:
+    eastern_now = datetime.now(ZoneInfo("America/New_York"))
+    return (eastern_now - timedelta(days=days)).strftime("%Y-%m-%d")
 
 def api_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Dict[str, Any]:
     key = url + "::" + json.dumps(params or {}, sort_keys=True)
@@ -232,17 +251,75 @@ def get_pitcher_season_stats(player_id: Optional[int], season: int) -> Dict[str,
     return splits[0].get("stat", {}) or {}
 
 # =====================================================
-# Optional Statcast / pybaseball support
+# REAL Statcast support using pybaseball when available
 # =====================================================
 
-def optional_statcast_power(player_name: str) -> Dict[str, Any]:
+def load_statcast_player_cache(season: int) -> Dict[str, Dict[str, Any]]:
     """
-    Optional Statcast layer.
-    If pybaseball is installed in requirements.txt later, this can be expanded.
-    For now it returns cached/proxy values and will not break deployment.
+    Attempts to load real Statcast batting data using pybaseball.
+    If pybaseball is unavailable or slow/fails, safely returns {}.
     """
-    # Kept safe because Streamlit/GitHub Actions can be slow with pybaseball.
-    return {}
+    cache_key = f"batting_statcast_{season}"
+    if cache_key in STATCAST_CACHE:
+        return STATCAST_CACHE[cache_key]
+
+    if not USE_REAL_STATCAST:
+        return {}
+
+    try:
+        from pybaseball import batting_stats
+        print("[STATCAST] Loading batting_stats from pybaseball...")
+        data = batting_stats(season, qual=1)
+        if data is None or data.empty:
+            return {}
+
+        # Normalize columns defensively because pybaseball column names can vary.
+        data.columns = [str(c).strip() for c in data.columns]
+
+        player_cache = {}
+        for _, row in data.iterrows():
+            name = str(row.get("Name", "")).strip()
+            if not name:
+                continue
+
+            def get_any(*cols, default=None):
+                for c in cols:
+                    if c in row and pd.notna(row[c]):
+                        return row[c]
+                return default
+
+            player_cache[name.lower()] = {
+                "barrel_rate": safe_float(get_any("Barrel%", "Barrel %", "Barrel%", default=0), 0),
+                "hard_hit_rate": safe_float(get_any("HardHit%", "HardHit %", "HardHit%", default=0), 0),
+                "exit_velocity": safe_float(get_any("EV", "Avg EV", "avgEV", "Exit Velocity", default=0), 0),
+                "launch_angle": safe_float(get_any("LA", "Avg LA", "Launch Angle", default=0), 0),
+                "iso_statcast": safe_float(get_any("ISO", default=0), 0),
+                "max_ev": safe_float(get_any("maxEV", "Max EV", default=0), 0),
+            }
+
+        STATCAST_CACHE[cache_key] = player_cache
+        save_json(STATCAST_CACHE_FILE, STATCAST_CACHE)
+        print(f"[STATCAST] Cached {len(player_cache)} hitters.")
+        return player_cache
+
+    except Exception as e:
+        print(f"[STATCAST] Real Statcast unavailable, using proxy fallback. Reason: {e}")
+        return {}
+
+def optional_statcast_power(player_name: str, statcast_cache: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    key = str(player_name).strip().lower()
+    data = statcast_cache.get(key, {})
+    if not data:
+        return {}
+
+    # Convert pybaseball percent columns safely. Some return 12.3, some 0.123.
+    out = {}
+    for k, v in data.items():
+        val = safe_float(v, 0)
+        if k in ["barrel_rate", "hard_hit_rate"] and val <= 1:
+            val *= 100
+        out[k] = round(val, 2)
+    return out
 
 # =====================================================
 # Park/weather engines
@@ -270,13 +347,6 @@ def angle_diff(a: float, b: float) -> float:
     return min(diff, 360 - diff)
 
 def wind_hr_impact(venue: str, wind_direction: Any, wind_speed: Any) -> Dict[str, Any]:
-    """
-    Rough wind-to-HR logic:
-    - If wind direction aligns with outfield direction, boost
-    - Opposite direction, drag
-    - Crosswind, neutral
-    Note: uses approximate stadium orientation.
-    """
     speed = safe_float(wind_speed, 0)
     try:
         direction = float(wind_direction)
@@ -459,9 +529,6 @@ def lineup_score(spot: int) -> float:
     return 62
 
 def hr_probability_from_score(score: float) -> float:
-    """
-    Convert 0-100 model strength into realistic HR probability percentage.
-    """
     prob = 1.8 + ((score - 55) * 0.24)
     return round(clamp(prob, 1.5, 16.5), 2)
 
@@ -469,10 +536,6 @@ def edge_proxy(hr_probability: float) -> float:
     return round(clamp((hr_probability - 5.5) * 2.2, -10, 18), 2)
 
 def risk_label(confidence: float) -> str:
-    """
-    Stricter risk buckets so LOW risk is selective.
-    HRs are volatile, so most plays should not be LOW risk.
-    """
     if confidence >= 88:
         return "LOW"
     if confidence >= 76:
@@ -488,15 +551,7 @@ def hand_split_note(batter_hand: str, pitcher_hand: str) -> str:
         return "RHB vs LHP advantage check"
     return "Same-side split check"
 
-def pitch_type_matchup_score(batter_hand: str, pitcher_hand: str, pitcher_stats: Dict[str, Any], pwr: float) -> Dict[str, Any]:
-    """
-    Foundation for pitch-type matchup.
-    MLB StatsAPI does not provide direct pitch mix here, so we use a safe foundation:
-    - platoon edge
-    - pitcher HR/9 weakness
-    - hitter power profile
-    Later this can be replaced by Baseball Savant pitch mix.
-    """
+def pitch_type_matchup_score(batter_hand: str, pitcher_hand: str, pitcher_stats: Dict[str, Any], pwr: float, statcast_extra: Dict[str, Any]) -> Dict[str, Any]:
     score = 70
     notes = []
 
@@ -521,6 +576,25 @@ def pitch_type_matchup_score(batter_hand: str, pitcher_hand: str, pitcher_stats:
         score -= 5
         notes.append("Pitcher suppresses HRs")
 
+    barrel = safe_float(statcast_extra.get("barrel_rate", 0), 0)
+    hardhit = safe_float(statcast_extra.get("hard_hit_rate", 0), 0)
+    ev = safe_float(statcast_extra.get("exit_velocity", 0), 0)
+
+    if barrel >= 13:
+        score += 6
+        notes.append("Real Statcast barrel rate is elite")
+    elif barrel >= 9:
+        score += 3
+        notes.append("Real Statcast barrel rate is strong")
+
+    if hardhit >= 50:
+        score += 3
+        notes.append("Hard-hit profile supports HR upside")
+
+    if ev >= 91:
+        score += 2
+        notes.append("Exit velocity supports power")
+
     if pwr >= 82:
         score += 5
         notes.append("Elite power profile")
@@ -529,7 +603,7 @@ def pitch_type_matchup_score(batter_hand: str, pitcher_hand: str, pitcher_stats:
         notes.append("Strong power profile")
 
     return {
-        "pitch_matchup_score": clamp(score, 45, 95),
+        "pitch_matchup_score": clamp(score, 45, 96),
         "pitch_matchup": "; ".join(notes) if notes else "Neutral pitch matchup",
         "primary_pitch": "Pitch mix pending",
     }
@@ -540,6 +614,7 @@ def pitch_type_matchup_score(batter_hand: str, pitcher_hand: str, pitcher_stats:
 
 def build_candidate_rows(date: str) -> pd.DataFrame:
     season = datetime.now(ZoneInfo("America/New_York")).year
+    statcast_cache = load_statcast_player_cache(season)
     games = get_schedule(date)
     if not games:
         print("[WARN] No MLB games found.")
@@ -592,7 +667,19 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
                 batter_hand = info.get("batSide", {}).get("code", "Unknown")
 
                 pwr = power_score(stats)
-                statcast_extra = optional_statcast_power(player["player"])
+                statcast_extra = optional_statcast_power(player["player"], statcast_cache)
+
+                # If real Statcast exists, blend into power score.
+                if statcast_extra:
+                    barrel = safe_float(statcast_extra.get("barrel_rate", 0), 0)
+                    hardhit = safe_float(statcast_extra.get("hard_hit_rate", 0), 0)
+                    ev = safe_float(statcast_extra.get("exit_velocity", 0), 0)
+                    statcast_power = 50
+                    statcast_power += clamp((barrel - 7) * 2.3, -10, 25)
+                    statcast_power += clamp((hardhit - 38) * 0.9, -8, 18)
+                    statcast_power += clamp((ev - 88) * 2.0, -8, 14)
+                    pwr = round(clamp(pwr * 0.65 + statcast_power * 0.35, 35, 98), 1)
+
                 iso = iso_from_stats(stats) if stats else 0.160
                 slg = safe_float(stats.get("slg", 0.420), 0.420) if stats else 0.420
                 hrrate = hr_rate(stats) if stats else 0.025
@@ -619,12 +706,16 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
                 l_score = lineup_score(lineup_spot)
 
                 proxy = statcast_proxy_from_power(cand["power_score"])
-                barrel_rate = cand["statcast_extra"].get("barrel_rate", proxy["barrel_rate"])
-                hard_hit_rate = cand["statcast_extra"].get("hard_hit_rate", proxy["hard_hit_rate"])
-                fly_ball_rate = cand["statcast_extra"].get("fly_ball_rate", proxy["fly_ball_rate"])
-                pull_rate = cand["statcast_extra"].get("pull_rate", proxy["pull_rate"])
-                exit_velocity = cand["statcast_extra"].get("exit_velocity", proxy["exit_velocity"])
-                launch_angle = cand["statcast_extra"].get("launch_angle", proxy["launch_angle"])
+                sc = cand["statcast_extra"]
+
+                barrel_rate = sc.get("barrel_rate", proxy["barrel_rate"])
+                hard_hit_rate = sc.get("hard_hit_rate", proxy["hard_hit_rate"])
+                fly_ball_rate = sc.get("fly_ball_rate", proxy["fly_ball_rate"])
+                pull_rate = sc.get("pull_rate", proxy["pull_rate"])
+                exit_velocity = sc.get("exit_velocity", proxy["exit_velocity"])
+                launch_angle = sc.get("launch_angle", proxy["launch_angle"])
+                max_ev = sc.get("max_ev", "N/A")
+                statcast_source = "Real Statcast" if sc else "Proxy"
 
                 recent_power_proxy = clamp(55 + cand["hr_rate"] * 850, 45, 90)
 
@@ -633,6 +724,11 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
                     pitcher_hand,
                     pitcher_stats,
                     cand["power_score"],
+                    {
+                        "barrel_rate": barrel_rate,
+                        "hard_hit_rate": hard_hit_rate,
+                        "exit_velocity": exit_velocity,
+                    }
                 )
 
                 split_bonus = 0
@@ -687,6 +783,8 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
 
                 why_homer = (
                     f"Power score {round(cand['power_score'], 1)}; "
+                    f"{statcast_source} power data; "
+                    f"barrel rate {barrel_rate}; hard-hit {hard_hit_rate}; EV {exit_velocity}; "
                     f"projected lineup spot {lineup_spot}; "
                     f"pitcher HR/9 {p_hr9}; "
                     f"{p_label}; {weather['weather_boost']}; "
@@ -698,7 +796,7 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
                 why_fail = (
                     f"Home runs are low-frequency events; lineup is projected not confirmed; "
                     f"pitcher hand is {pitcher_hand}; weather direction is {weather['wind_direction']}; "
-                    f"pitch mix data is estimated until full Statcast pitch feed is connected."
+                    f"full pitch-by-pitch mix is still pending until dedicated pitch feed is connected."
                 )
 
                 reason = (
@@ -733,6 +831,8 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
                     "fly_ball_rate": fly_ball_rate,
                     "exit_velocity": exit_velocity,
                     "launch_angle": launch_angle,
+                    "max_ev": max_ev,
+                    "statcast_source": statcast_source,
                     "iso": cand["iso"],
                     "slg": cand["slg"],
                     "pull_rate": pull_rate,
@@ -767,7 +867,6 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
 
     out = out.sort_values("smart_rank_score", ascending=False)
 
-    # Balanced board: stops one team from taking over, but keeps a strong slate.
     team_counts = defaultdict(int)
     balanced_rows = []
 
@@ -786,7 +885,7 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
 
 def main():
     date = tomorrow_date()
-    print(f"[HR MACHINE] Building ELITE HR predictions for {date}...")
+    print(f"[HR MACHINE] Building ELITE HR predictions V2 for {date}...")
     picks = build_candidate_rows(date)
 
     if picks.empty:
@@ -795,8 +894,8 @@ def main():
             "opposing_pitcher", "pitcher", "pitcher_hand", "batter_hand",
             "lineup_spot", "starter_confirmed", "hr_probability", "real_hr_probability", "probability",
             "rating", "smart_rank_score", "edge", "barrel_rate", "hard_hit_rate", "fly_ball_rate",
-            "exit_velocity", "launch_angle", "iso", "slg", "pull_rate", "pitcher_hr9",
-            "pitcher_barrel_allowed", "primary_pitch", "pitch_matchup", "pitch_matchup_score",
+            "exit_velocity", "launch_angle", "max_ev", "statcast_source", "iso", "slg", "pull_rate",
+            "pitcher_hr9", "pitcher_barrel_allowed", "primary_pitch", "pitch_matchup", "pitch_matchup_score",
             "park", "park_factor", "park_score", "weather_boost", "weather",
             "weather_score", "wind_label", "wind_score", "wind_boost", "wind_direction",
             "wind_speed", "temperature", "humidity", "confidence_score", "risk",
@@ -804,13 +903,14 @@ def main():
         ])
 
     picks.to_csv(OUTPUT_FILE, index=False)
-    save_cache(CACHE)
+    save_json(CACHE_FILE, CACHE)
+    save_json(STATCAST_CACHE_FILE, STATCAST_CACHE)
 
     print(f"[HR MACHINE] Saved {len(picks)} HR picks to {OUTPUT_FILE.resolve()}")
 
     if len(picks):
         print("\nTop 10 HR Targets:")
-        cols = ["player", "team", "opposing_pitcher", "hr_probability", "confidence_score", "smart_rank_score", "risk"]
+        cols = ["player", "team", "opposing_pitcher", "hr_probability", "confidence_score", "smart_rank_score", "statcast_source", "risk"]
         print(picks[cols].head(10).to_string(index=False))
 
 if __name__ == "__main__":
