@@ -15,7 +15,7 @@ Features:
 """
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import base64
 import math
 
@@ -229,6 +229,8 @@ game_col = find_col("game")
 game_date_display_col = find_col("game_date_display", "date", "game_date")
 game_time_col = find_col("game_time_et", "game_time", "start_time")
 game_day_col = find_col("game_day", "day")
+slate_type_col = find_col("slate_type", "slate")
+game_datetime_utc_col = find_col("game_datetime_utc", "game_datetime", "start_datetime")
 pitch_mix_col = find_col("pitch_mix", "primary_pitch", "pitcher_primary_pitch")
 pitch_matchup_col = find_col("pitch_matchup", "pitch_type_matchup")
 
@@ -429,11 +431,83 @@ with header_right:
     st.write("")
     st.success(f"Model Active • Updated {datetime.now().strftime('%I:%M %p')}")
 
+
+def parse_game_datetime(row):
+    value = safe(row, game_datetime_utc_col, "")
+    try:
+        raw = str(value)
+        if not raw or raw == "N/A":
+            return None
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+def countdown_text(row):
+    dt = parse_game_datetime(row)
+    if dt is None:
+        return "Countdown: TBD"
+
+    now = datetime.now(timezone.utc)
+    diff = (dt - now).total_seconds()
+
+    if diff > 0:
+        hours = int(diff // 3600)
+        minutes = int((diff % 3600) // 60)
+        if hours >= 24:
+            days = hours // 24
+            rem_hours = hours % 24
+            return f"Starts in {days}d {rem_hours}h"
+        if hours >= 1:
+            return f"Starts in {hours}h {minutes}m"
+        return f"Starts in {minutes}m"
+
+    # Simple post-start status estimate
+    elapsed = abs(diff)
+    if elapsed <= 4.5 * 3600:
+        return "Live / In Progress"
+    return "Final / Completed"
+
+def slate_status_text(dataframe):
+    if dataframe.empty:
+        return "No games found"
+
+    times = []
+    for _, r in dataframe.iterrows():
+        dt = parse_game_datetime(r)
+        if dt is not None:
+            times.append(dt)
+
+    if not times:
+        return "Slate time TBD"
+
+    now = datetime.now(timezone.utc)
+    upcoming = [t for t in times if t > now]
+    live = [t for t in times if t <= now and (now - t).total_seconds() <= 4.5 * 3600]
+
+    if live:
+        return f"🟢 Live slate • {len(live)} game(s) in progress"
+    if upcoming:
+        next_game = min(upcoming)
+        seconds = (next_game - now).total_seconds()
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        if hours >= 24:
+            return f"🟣 Upcoming slate • first game in {hours//24}d {hours%24}h"
+        if hours >= 1:
+            return f"🟣 Upcoming slate • first game in {hours}h {minutes}m"
+        return f"🟣 Upcoming slate • first game in {minutes}m"
+
+    return "⚪ Slate completed"
+
+
 # =========================================================
 # FILTERS
 # =========================================================
 with st.container(border=True):
-    c1, c2, c3, c4, c5 = st.columns([1.55, 1.15, 1.0, 1.2, 1.0])
+    c0, c1, c2, c3, c4, c5 = st.columns([1.0, 1.55, 1.15, 1.0, 1.2, 1.0])
+
+    with c0:
+        slate_view = st.selectbox("Slate", ["Today", "Tomorrow", "All"], index=1)
 
     with c1:
         search = st.text_input("Search Player", placeholder="Judge, Ohtani, Soto...")
@@ -458,6 +532,9 @@ with st.container(border=True):
 # =========================================================
 filtered = df.copy()
 
+if slate_type_col and slate_view != "All":
+    filtered = filtered[filtered[slate_type_col].astype(str).str.upper() == slate_view.upper()]
+
 if search:
     filtered = filtered[filtered[player_col].astype(str).str.contains(search, case=False, na=False)]
 
@@ -481,6 +558,16 @@ m3.metric("Avg Real HR%", f"{filtered['_real_hr_prob'].mean():.1f}%" if len(filt
 m4.metric("Elite Profiles", int((filtered["_adjusted_strength"] >= 90).sum()))
 m5.metric("Low Risk", int((filtered[risk_col].astype(str).str.upper() == "LOW").sum()) if risk_col else 0)
 
+
+# =========================================================
+# LIVE SLATE STATUS
+# =========================================================
+with st.container(border=True):
+    s1, s2, s3 = st.columns([1.3, 1.3, 2.4])
+    s1.metric("Selected Slate", slate_view)
+    s2.metric("Visible Games", int(display_df["game"].nunique()) if "game" in display_df.columns and len(display_df) else 0)
+    s3.metric("Live Slate Status", slate_status_text(display_df))
+
 # =========================================================
 # TOP TARGETS
 # =========================================================
@@ -500,7 +587,7 @@ for i, (_, row) in enumerate(filtered.head(5).iterrows()):
             st.caption(f"#{i+1} TARGET • {tag}")
             st.markdown(f"### {safe(row, player_col)}")
             st.caption(f"{safe(row, team_col, 'MLB')} vs {safe(row, pitcher_col, 'Projected Starter')}")
-            st.caption(f"🕒 {game_time_text(row)}")
+            st.caption(f"🕒 {game_time_full_text(row)}")
             st.metric("Real HR Probability", f"{row['_real_hr_prob']}%")
             st.write(f"**Strength:** {strength}/100")
             st.progress(int(max(0, min(100, strength))))
@@ -563,7 +650,7 @@ for _, row in display_df.iterrows():
             st.write(f"### {risk_emoji(risk)}")
 
         with c[8]:
-            st.write(f"**Game Time:** {game_time_text(row)}")
+            st.write(f"**Game Time:** {game_time_full_text(row)}")
             st.write(f"**Pitcher:** {safe(row, pitcher_col, 'Projected Starter')}")
             st.write(f"**Park:** {safe(row, park_col, 'Neutral')}")
             st.write(f"**Weather:** {safe(row, weather_col, 'Neutral')}")
@@ -593,7 +680,7 @@ with st.container(border=True):
         st.image(get_image(selected), width=165)
         st.markdown(f"## {safe(selected, player_col)}")
         st.caption(f"{safe(selected, team_col, 'MLB')} • {safe(selected, pos_col, 'BAT')} • Bat: {safe(selected, hand_col, 'Unknown')}")
-        st.caption(f"🕒 Plays: {game_time_text(selected)}")
+        st.caption(f"🕒 Plays: {game_time_full_text(selected)}")
         st.write(selected_tag)
         st.metric("Real HR Probability", f"{selected_prob}%")
         st.metric("Strength Score", f"{selected_strength}/100")
