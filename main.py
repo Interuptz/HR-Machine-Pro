@@ -53,9 +53,9 @@ CACHE_FILE = Path("player_cache.json")
 STATCAST_CACHE_FILE = Path("statcast_cache.json")
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
-MAX_PLAYERS_PER_TEAM = 12
+MAX_PLAYERS_PER_TEAM = 14
 MAX_FINAL_PLAYERS_PER_TEAM = 4
-MAX_FINAL_ROWS = 260
+MAX_FINAL_ROWS = 320
 REQUEST_SLEEP = 0.01
 
 POWER_WATCHLIST = {
@@ -494,6 +494,19 @@ def park_score(venue: str) -> float:
     factor = get_stadium_meta(venue)["factor"]
     return clamp(70 + ((factor - 1.00) * 125), 45, 95)
 
+def ballpark_hr_zone(venue: str, batter_hand: str) -> str:
+    factor = get_stadium_meta(venue)["factor"]
+    if factor >= 1.10:
+        base = "Strong HR park"
+    elif factor >= 1.03:
+        base = "Slight HR park"
+    elif factor <= 0.94:
+        base = "Pitcher-friendly park"
+    else:
+        base = "Neutral HR park"
+    side = "pull-side RH power" if batter_hand == "R" else "pull-side LH power" if batter_hand == "L" else "unknown pull side"
+    return f"{base} • {side}"
+
 def angle_diff(a: float, b: float) -> float:
     diff = abs(a - b) % 360
     return min(diff, 360 - diff)
@@ -703,6 +716,44 @@ def hand_split_note(batter_hand: str, pitcher_hand: str) -> str:
         return "RHB vs LHP advantage check"
     return "Same-side split check"
 
+def player_availability_status(info: Dict[str, Any]) -> Dict[str, str]:
+    status = info.get("active")
+    if status is False:
+        return {"injury_status": "Not Active", "lineup_status": "Bench/Injury Risk"}
+    status_desc = info.get("status", {}).get("description", "")
+    if status_desc:
+        lowered = status_desc.lower()
+        if "injured" in lowered or "il" in lowered:
+            return {"injury_status": status_desc, "lineup_status": "Injury Risk"}
+    return {"injury_status": "Active", "lineup_status": "Projected"}
+
+def avoid_warning_text(confidence: float, weather: Dict[str, Any], p_hr9: float, lineup_spot: int, pitch_match_score: float) -> str:
+    warnings = []
+    if weather.get("wind_boost", 0) < 0:
+        warnings.append("Wind drag")
+    if weather.get("weather_score", 70) <= 63:
+        warnings.append("Weather drag")
+    if p_hr9 <= 0.8:
+        warnings.append("Pitcher suppresses HR")
+    if lineup_spot >= 7:
+        warnings.append("Low lineup spot")
+    if pitch_match_score < 62:
+        warnings.append("Weak matchup")
+    if confidence < 76:
+        warnings.append("Volatile profile")
+    return " | ".join(warnings) if warnings else "No major red flags"
+
+def confidence_component_string(power: float, pitcher: float, weather_score: float, park: float, recent: float, lineup: float, pitch: float) -> str:
+    return (
+        f"Power 30%: {round(power,1)} | "
+        f"Pitcher 20%: {round(pitcher,1)} | "
+        f"Weather 15%: {round(weather_score,1)} | "
+        f"Park 15%: {round(park,1)} | "
+        f"Recent HR 10%: {round(recent,1)} | "
+        f"Lineup 10%: {round(lineup,1)} | "
+        f"Pitch Matchup: {round(pitch,1)}"
+    )
+
 def pitch_type_matchup_score(batter_hand: str, pitcher_hand: str, pitcher_stats: Dict[str, Any], pwr: float, statcast_extra: Dict[str, Any]) -> Dict[str, Any]:
     score = 70
     notes = []
@@ -817,6 +868,7 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                 stats = get_player_season_stats(pid, season)
                 info = get_person_info(pid)
                 batter_hand = info.get("batSide", {}).get("code", "Unknown")
+                availability = player_availability_status(info)
 
                 pwr = power_score(stats)
                 statcast_extra = optional_statcast_power(player["player"], statcast_cache)
@@ -845,6 +897,8 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                     "mlb_id": pid,
                     "position": player["position"],
                     "bat_side": batter_hand,
+                    "injury_status": availability["injury_status"],
+                    "lineup_status": availability["lineup_status"],
                     "stats": stats,
                     "power_score": pwr,
                     "iso": round(iso, 3),
@@ -994,6 +1048,18 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                     "batter_hand": cand["bat_side"],
                     "lineup_spot": lineup_spot,
                     "starter_confirmed": "Projected",
+                    "injury_status": cand.get("injury_status", "Active"),
+                    "lineup_status": cand.get("lineup_status", "Projected"),
+                    "ballpark_hr_zone": ballpark_hr_zone(venue, cand["bat_side"]),
+                    "avoid_warning": avoid_warning_text(confidence, weather, p_hr9, lineup_spot, pitch_match["pitch_matchup_score"]),
+                    "confidence_components": confidence_component_string(
+                        cand["power_score"], p_weak, weather["weather_score"], p_score,
+                        recent_power_proxy, l_score, pitch_match["pitch_matchup_score"]
+                    ),
+                    "sportsbook_odds": "N/A",
+                    "implied_probability": "N/A",
+                    "value_edge": "Odds feed not connected",
+                    "favorite": "No",
                     "hr_probability": hr_prob,
                     "real_hr_probability": hr_prob,
                     "probability": hr_prob,
@@ -1081,7 +1147,7 @@ def main():
             "date", "slate_type", "game_date_display", "game_time_et", "game_day", "game_datetime_utc",
             "game", "player", "team", "position", "mlb_id", "prop", "line",
             "opposing_pitcher", "pitcher", "pitcher_hand", "batter_hand",
-            "lineup_spot", "starter_confirmed", "hr_probability", "real_hr_probability", "probability",
+            "lineup_spot", "starter_confirmed", "injury_status", "lineup_status", "ballpark_hr_zone", "avoid_warning", "confidence_components", "sportsbook_odds", "implied_probability", "value_edge", "favorite", "hr_probability", "real_hr_probability", "probability",
             "rating", "smart_rank_score", "edge", "barrel_rate", "hard_hit_rate", "fly_ball_rate",
             "exit_velocity", "launch_angle", "max_ev", "statcast_source", "last_5_hr_games", "last_5_hr_count", "last_hr_days_ago", "recent_hr_chart_data", "iso", "slg", "pull_rate",
             "pitcher_hr9", "pitcher_barrel_allowed", "primary_pitch", "pitch_matchup", "pitch_matchup_score",
