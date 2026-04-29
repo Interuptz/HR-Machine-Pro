@@ -959,8 +959,7 @@ def main():
     print(f"[HR MACHINE] Saved {len(picks)} HR picks to {OUTPUT_FILE.resolve()}")
 
     if len(picks):
-        print("
-Top 10 HR Targets:")
+        print("\nTop 10 HR Targets:")
         cols = [c for c in ["slate_type", "date", "game_time_et", "player", "team", "opposing_pitcher", "hr_probability", "confidence_score", "smart_rank_score", "risk"] if c in picks.columns]
         print(picks[cols].head(10).to_string(index=False))
 
