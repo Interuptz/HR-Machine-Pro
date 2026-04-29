@@ -253,6 +253,15 @@ pitch_matchup_col = find_col("pitch_matchup", "pitch_type_matchup")
 last_5_hr_col = find_col("last_5_hr_games", "last_hr_games")
 last_5_hr_count_col = find_col("last_5_hr_count", "recent_hr_count")
 last_hr_days_col = find_col("last_hr_days_ago", "last_hr_days")
+injury_status_col = find_col("injury_status", "status")
+lineup_status_col = find_col("lineup_status", "lineup_confirmed")
+ballpark_zone_col = find_col("ballpark_hr_zone", "hr_zone")
+avoid_warning_col = find_col("avoid_warning", "avoid")
+confidence_components_col = find_col("confidence_components", "model_components")
+sportsbook_odds_col = find_col("sportsbook_odds", "odds")
+implied_probability_col = find_col("implied_probability", "implied_prob")
+value_edge_col = find_col("value_edge", "value")
+favorite_col = find_col("favorite")
 recent_hr_chart_col = find_col("recent_hr_chart_data", "hr_chart_data")
 
 if player_col is None:
@@ -568,6 +577,30 @@ def render_recent_hr_chart(row):
     st.plotly_chart(fig, use_container_width=True)
 
 
+
+def unique_top_targets(dataframe, limit=5):
+    if dataframe.empty:
+        return dataframe
+    sort_col = "_adjusted_strength"
+    if "smart_rank_score" in dataframe.columns:
+        sort_col = "smart_rank_score"
+    temp = dataframe.copy()
+    temp[sort_col] = pd.to_numeric(temp[sort_col], errors="coerce").fillna(0)
+    temp = temp.sort_values(sort_col, ascending=False)
+    if player_col in temp.columns:
+        temp = temp.drop_duplicates(subset=[player_col], keep="first")
+    return temp.head(limit)
+
+def trust_line(row):
+    return f"Lineup: {safe(row, lineup_status_col, 'Projected')} • Status: {safe(row, injury_status_col, 'Active')}"
+
+def value_edge_line(row):
+    odds = safe(row, sportsbook_odds_col, "N/A")
+    implied = safe(row, implied_probability_col, "N/A")
+    edge = safe(row, value_edge_col, "Odds feed not connected")
+    return f"Odds: {odds} • Implied: {implied} • Edge: {edge}"
+
+
 def recent_hr_summary(row):
     count = safe(row, last_5_hr_count_col, 0)
     days = safe(row, last_hr_days_col, "N/A")
@@ -665,7 +698,10 @@ if risk_col and risk_filter != "All":
 
 filtered = filtered[pd.to_numeric(filtered["_adjusted_strength"], errors="coerce").fillna(0) >= min_strength]
 filtered = filtered.sort_values("_adjusted_strength", ascending=False)
-display_df = filtered.head(show_limit)
+if search and len(filtered):
+    display_df = filtered.head(250)
+else:
+    display_df = filtered.head(show_limit)
 
 # =========================================================
 # METRICS
@@ -694,7 +730,7 @@ st.subheader("🔥 Top HR Targets")
 st.caption("Best next-day HR profiles after wind and split adjustment.")
 
 top_cols = st.columns(5)
-for i, (_, row) in enumerate(filtered.head(5).iterrows()):
+for i, (_, row) in enumerate(unique_top_targets(filtered, 5).iterrows()):
     strength = row["_adjusted_strength"]
     risk = safe(row, risk_col, "N/A")
     tag, _ = profile_tag(strength, risk)
@@ -774,6 +810,9 @@ for _, row in display_df.iterrows():
             st.write(f"**Game Time:** {safe(row, game_day_col, 'TBD')} • {safe(row, game_date_display_col, 'TBD')} • {safe(row, game_time_col, 'TBD')}")
             st.write(f"**Status:** {game_status_badge(row)}")
             st.write(f"**Recent HR:** {recent_hr_summary(row)}")
+            st.write(f"**Availability:** {trust_line(row)}")
+            st.write(f"**HR Zone:** {safe(row, ballpark_zone_col, 'N/A')}")
+            st.write(f"**Avoid Flags:** {safe(row, avoid_warning_col, 'No major red flags')}")
             st.write(f"**Pitcher:** {safe(row, pitcher_col, 'Projected Starter')}")
             st.write(f"**Park:** {safe(row, park_col, 'Neutral')}")
             st.write(f"**Weather:** {safe(row, weather_col, 'Neutral')}")
@@ -830,6 +869,15 @@ with st.container(border=True):
         st.markdown("### Last 5 Home Runs")
         st.info(safe(selected, last_5_hr_col, "No HR game log found"))
         render_recent_hr_chart(selected)
+
+        st.markdown("### Model Trust / Edge")
+        st.info(trust_line(selected))
+        st.write(f"**Sportsbook Value:** {value_edge_line(selected)}")
+        st.write(f"**Ballpark HR Zone:** {safe(selected, ballpark_zone_col, 'N/A')}")
+        st.warning(safe(selected, avoid_warning_col, "No major red flags"))
+
+        st.markdown("### Confidence Breakdown")
+        st.code(safe(selected, confidence_components_col, "Components unavailable"))
 
         st.markdown("### Why He Can Homer")
 
