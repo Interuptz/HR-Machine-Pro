@@ -269,61 +269,97 @@ def get_player_season_stats(player_id: int, season: int) -> Dict[str, Any]:
 
 def get_last_5_hr_games(player_id: int, season: int, target_date: str) -> Dict[str, Any]:
     """
-    Pull hitter game logs and return the last 5 games where the player hit a HR.
-    Safe fallback returns empty history if MLB API has no log data.
+    Pull hitter game logs and return:
+    - last 5 games where player hit a HR
+    - last 10 games chart data including 0-HR games for visual pattern
     """
     data = api_get(
         f"{MLB_API_BASE}/people/{player_id}/stats",
         {"stats": "gameLog", "group": "hitting", "season": season},
     )
 
+    empty = {
+        "last_5_hr_games": "No HR game log found",
+        "last_5_hr_count": 0,
+        "last_hr_days_ago": "N/A",
+        "recent_hr_chart_data": "[]",
+    }
+
     stats_list = data.get("stats", [])
     if not stats_list:
-        return {"last_5_hr_games": "No HR game log found", "last_5_hr_count": 0, "last_hr_days_ago": "N/A"}
+        return empty
 
     splits = stats_list[0].get("splits", [])
     if not splits:
-        return {"last_5_hr_games": "No HR game log found", "last_5_hr_count": 0, "last_hr_days_ago": "N/A"}
+        return empty
 
     try:
         target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
     except Exception:
         target_dt = datetime.now(ZoneInfo("America/New_York")).date()
 
-    hr_games = []
-
+    # Normalize all game logs first
+    all_games = []
     for s in splits:
         stat = s.get("stat", {}) or {}
-        hr = safe_float(stat.get("homeRuns", 0), 0)
-        if hr <= 0:
-            continue
-
+        hr = int(safe_float(stat.get("homeRuns", 0), 0))
         date_raw = s.get("date", "")
         opponent = s.get("opponent", {}).get("name", "Opponent")
+
         try:
             game_dt = datetime.strptime(date_raw, "%Y-%m-%d").date()
             days_ago = max(0, (target_dt - game_dt).days)
-            date_label = game_dt.strftime("%b %d")
+            date_label = game_dt.strftime("%-m/%-d/%y")
+            short_date = game_dt.strftime("%b %d")
         except Exception:
+            game_dt = None
             days_ago = "N/A"
             date_label = date_raw or "Unknown"
+            short_date = date_label
 
-        hr_games.append({
+        opp_abbr = opponent
+        if isinstance(opponent, str):
+            words = opponent.replace(".", "").split()
+            if len(words) >= 2:
+                opp_abbr = "".join(w[0] for w in words[-2:]).upper()[:3]
+            else:
+                opp_abbr = opponent[:3].upper()
+
+        all_games.append({
             "date": date_raw,
             "date_label": date_label,
+            "short_date": short_date,
             "opponent": opponent,
-            "hr": int(hr),
+            "opponent_abbr": opp_abbr,
+            "label": f"@{opp_abbr}\n{date_label}",
+            "hr": hr,
             "days_ago": days_ago,
         })
 
-    # Game logs are usually reverse chronological, but sort safely.
-    def sort_key(x):
-        return x.get("date", "")
+    all_games = sorted(all_games, key=lambda x: x.get("date", ""), reverse=True)
 
-    hr_games = sorted(hr_games, key=sort_key, reverse=True)[:5]
+    # Chart should show recent game pattern including 0-HR games
+    recent_games = list(reversed(all_games[:10]))
+    chart_data = []
+    for g in recent_games:
+        chart_data.append({
+            "Game": g["label"],
+            "Date": g["short_date"],
+            "Opponent": g["opponent"],
+            "HR": g["hr"],
+            "Days Ago": g["days_ago"],
+            "Tooltip": f"{g['short_date']} vs {g['opponent']} — {g['hr']} HR",
+        })
+
+    hr_games = [g for g in all_games if g["hr"] > 0][:5]
 
     if not hr_games:
-        return {"last_5_hr_games": "No HR yet this season", "last_5_hr_count": 0, "last_hr_days_ago": "N/A"}
+        return {
+            "last_5_hr_games": "No HR yet this season",
+            "last_5_hr_count": 0,
+            "last_hr_days_ago": "N/A",
+            "recent_hr_chart_data": json.dumps(chart_data),
+        }
 
     parts = []
     for g in hr_games:
@@ -335,12 +371,13 @@ def get_last_5_hr_games(player_id: int, season: int, target_date: str) -> Dict[s
             ago = "1 day ago"
         else:
             ago = f"{g['days_ago']} days ago"
-        parts.append(f"{g['date_label']} vs {g['opponent']}: {g['hr']} HR ({ago})")
+        parts.append(f"{g['short_date']} vs {g['opponent']}: {g['hr']} HR ({ago})")
 
     return {
         "last_5_hr_games": " | ".join(parts),
         "last_5_hr_count": int(sum(g["hr"] for g in hr_games)),
         "last_hr_days_ago": hr_games[0]["days_ago"],
+        "recent_hr_chart_data": json.dumps(chart_data),
     }
 
 def get_pitcher_season_stats(player_id: Optional[int], season: int) -> Dict[str, Any]:
@@ -963,6 +1000,7 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                     "last_5_hr_games": cand.get("last_hr_data", {}).get("last_5_hr_games", "N/A"),
                     "last_5_hr_count": cand.get("last_hr_data", {}).get("last_5_hr_count", 0),
                     "last_hr_days_ago": cand.get("last_hr_data", {}).get("last_hr_days_ago", "N/A"),
+                    "recent_hr_chart_data": cand.get("last_hr_data", {}).get("recent_hr_chart_data", "[]"),
                     "iso": cand["iso"],
                     "slg": cand["slg"],
                     "pull_rate": pull_rate,
@@ -1032,7 +1070,7 @@ def main():
             "opposing_pitcher", "pitcher", "pitcher_hand", "batter_hand",
             "lineup_spot", "starter_confirmed", "hr_probability", "real_hr_probability", "probability",
             "rating", "smart_rank_score", "edge", "barrel_rate", "hard_hit_rate", "fly_ball_rate",
-            "exit_velocity", "launch_angle", "max_ev", "statcast_source", "last_5_hr_games", "last_5_hr_count", "last_hr_days_ago", "iso", "slg", "pull_rate",
+            "exit_velocity", "launch_angle", "max_ev", "statcast_source", "last_5_hr_games", "last_5_hr_count", "last_hr_days_ago", "recent_hr_chart_data", "iso", "slg", "pull_rate",
             "pitcher_hr9", "pitcher_barrel_allowed", "primary_pitch", "pitch_matchup", "pitch_matchup_score",
             "park", "park_factor", "park_score", "weather_boost", "weather",
             "weather_score", "wind_label", "wind_score", "wind_boost", "wind_direction",
