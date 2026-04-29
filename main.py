@@ -140,6 +140,28 @@ def safe_float(value: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
+def format_game_time(game_date_value: Any) -> Dict[str, str]:
+    """
+    Convert MLB API UTC gameDate into Eastern display fields.
+    """
+    try:
+        raw = str(game_date_value)
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        et = dt.astimezone(ZoneInfo("America/New_York"))
+        return {
+            "game_datetime_utc": raw,
+            "game_date_display": et.strftime("%b %d, %Y"),
+            "game_time_et": et.strftime("%I:%M %p ET").lstrip("0"),
+            "game_day": et.strftime("%A"),
+        }
+    except Exception:
+        return {
+            "game_datetime_utc": str(game_date_value) if game_date_value else "Unknown",
+            "game_date_display": "Unknown",
+            "game_time_et": "TBD",
+            "game_day": "TBD",
+        }
+
 def tomorrow_date() -> str:
     eastern_now = datetime.now(ZoneInfo("America/New_York"))
     return (eastern_now + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -184,9 +206,15 @@ def get_schedule(date: str) -> List[Dict[str, Any]]:
             away = teams.get("away", {})
             home = teams.get("home", {})
 
+            time_info = format_game_time(game.get("gameDate"))
+
             games.append({
                 "game_pk": game.get("gamePk"),
                 "game_date": game.get("gameDate"),
+                "game_datetime_utc": time_info["game_datetime_utc"],
+                "game_date_display": time_info["game_date_display"],
+                "game_time_et": time_info["game_time_et"],
+                "game_day": time_info["game_day"],
                 "venue": game.get("venue", {}).get("name", "Unknown Park"),
                 "away_team": away.get("team", {}).get("name", "Away"),
                 "away_team_id": away.get("team", {}).get("id"),
@@ -807,6 +835,10 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
 
                 rows.append({
                     "date": date,
+                    "game_date_display": game.get("game_date_display", date),
+                    "game_time_et": game.get("game_time_et", "TBD"),
+                    "game_day": game.get("game_day", "TBD"),
+                    "game_datetime_utc": game.get("game_datetime_utc", ""),
                     "game": f"{game['away_team']} @ {game['home_team']}",
                     "player": cand["player"],
                     "team": side["team"],
@@ -890,7 +922,7 @@ def main():
 
     if picks.empty:
         picks = pd.DataFrame(columns=[
-            "date", "game", "player", "team", "position", "mlb_id", "prop", "line",
+            "date", "game_date_display", "game_time_et", "game_day", "game_datetime_utc", "game", "player", "team", "position", "mlb_id", "prop", "line",
             "opposing_pitcher", "pitcher", "pitcher_hand", "batter_hand",
             "lineup_spot", "starter_confirmed", "hr_probability", "real_hr_probability", "probability",
             "rating", "smart_rank_score", "edge", "barrel_rate", "hard_hit_rate", "fly_ball_rate",
