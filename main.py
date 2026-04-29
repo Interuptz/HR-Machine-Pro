@@ -32,10 +32,12 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List
+from collections import defaultdict
 
 OUTPUT_FILE = Path("latest_picks.csv")
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 MAX_PLAYERS_PER_TEAM = 7
+MAX_FINAL_PLAYERS_PER_TEAM = 2
 
 # =====================================================
 # Stadium coordinates + HR park factors
@@ -97,9 +99,8 @@ def safe_float(value: Any, default: float = 0.0) -> float:
 
 def tomorrow_date() -> str:
     """
-    Uses Eastern Time so GitHub Actions UTC time does not skip the slate date.
-    Example: if it is late Apr 28 in Eastern time, target remains Apr 29,
-    even if GitHub's server is already on Apr 29 UTC.
+    Use Eastern Time so GitHub Actions UTC time does not skip the slate date.
+    This keeps the model aligned to MLB/New York time.
     """
     eastern_now = datetime.now(ZoneInfo("America/New_York"))
     return (eastern_now + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -364,16 +365,25 @@ def lineup_score(spot: int) -> float:
     return 62
 
 def hr_probability_from_score(score: float) -> float:
-    prob = 2.0 + ((score - 55) * 0.32)
-    return round(clamp(prob, 1.5, 18.5), 2)
+    """
+    Convert 0-100 model strength into a realistic HR probability percentage.
+    This is intentionally conservative: most HR props should sit around 2%-13%,
+    with only rare elite profiles reaching the mid-to-high teens.
+    """
+    prob = 1.8 + ((score - 55) * 0.24)
+    return round(clamp(prob, 1.5, 16.5), 2)
 
 def edge_proxy(hr_probability: float) -> float:
     return round(clamp((hr_probability - 5.5) * 2.2, -10, 18), 2)
 
 def risk_label(confidence: float) -> str:
-    if confidence >= 84:
+    """
+    Stricter risk buckets so LOW risk is selective.
+    HRs are volatile, so most plays should not be LOW risk.
+    """
+    if confidence >= 88:
         return "LOW"
-    if confidence >= 72:
+    if confidence >= 76:
         return "MED"
     return "HIGH"
 
@@ -497,14 +507,15 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
                 edge = edge_proxy(hr_prob)
 
                 confidence = round(clamp(
-                    rating * 0.40 +
-                    cand["power_score"] * 0.23 +
-                    p_weak * 0.15 +
-                    p_score * 0.08 +
-                    weather["weather_score"] * 0.07 +
-                    l_score * 0.07,
+                    rating * 0.34 +
+                    cand["power_score"] * 0.22 +
+                    p_weak * 0.14 +
+                    p_score * 0.07 +
+                    weather["weather_score"] * 0.06 +
+                    l_score * 0.07 -
+                    4.0,
                     1,
-                    99,
+                    96,
                 ), 1)
 
                 risk = risk_label(confidence)
@@ -543,6 +554,7 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
                     "lineup_spot": lineup_spot,
                     "starter_confirmed": "Projected",
                     "hr_probability": hr_prob,
+                    "real_hr_probability": hr_prob,
                     "probability": hr_prob,
                     "rating": rating,
                     "edge": edge,
@@ -574,7 +586,21 @@ def build_candidate_rows(date: str) -> pd.DataFrame:
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    return out.sort_values("confidence_score", ascending=False).head(150)
+
+    out = out.sort_values("confidence_score", ascending=False)
+
+    # Limit final board stacking so one team cannot dominate the top of the board.
+    team_counts = defaultdict(int)
+    balanced_rows = []
+
+    for _, row in out.iterrows():
+        team = row.get("team", "Unknown")
+        if team_counts[team] < MAX_FINAL_PLAYERS_PER_TEAM:
+            balanced_rows.append(row)
+            team_counts[team] += 1
+
+    balanced = pd.DataFrame(balanced_rows)
+    return balanced.sort_values("confidence_score", ascending=False).head(150)
 
 def main():
     date = tomorrow_date()
@@ -585,7 +611,7 @@ def main():
         picks = pd.DataFrame(columns=[
             "date", "game", "player", "team", "position", "mlb_id", "prop", "line",
             "opposing_pitcher", "pitcher", "pitcher_hand", "batter_hand",
-            "lineup_spot", "starter_confirmed", "hr_probability", "probability",
+            "lineup_spot", "starter_confirmed", "hr_probability", "real_hr_probability", "probability",
             "rating", "edge", "barrel_rate", "hard_hit_rate", "fly_ball_rate",
             "iso", "slg", "pull_rate", "pitcher_hr9", "pitcher_barrel_allowed",
             "park", "park_factor", "park_score", "weather_boost", "weather",
