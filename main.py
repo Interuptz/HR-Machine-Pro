@@ -53,10 +53,17 @@ CACHE_FILE = Path("player_cache.json")
 STATCAST_CACHE_FILE = Path("statcast_cache.json")
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
-MAX_PLAYERS_PER_TEAM = 8
-MAX_FINAL_PLAYERS_PER_TEAM = 2
-MAX_FINAL_ROWS = 150
+MAX_PLAYERS_PER_TEAM = 12
+MAX_FINAL_PLAYERS_PER_TEAM = 4
+MAX_FINAL_ROWS = 260
 REQUEST_SLEEP = 0.01
+
+POWER_WATCHLIST = {
+    "Mike Trout", "Aaron Judge", "Shohei Ohtani", "Kyle Schwarber", "Bryce Harper",
+    "Juan Soto", "Yordan Alvarez", "Pete Alonso", "Matt Olson", "Mookie Betts",
+    "Freddie Freeman", "Vladimir Guerrero Jr.", "Rafael Devers", "Fernando Tatis Jr.",
+    "Elly De La Cruz", "Cal Raleigh", "Corey Seager", "Marcus Semien", "Jose Ramirez",
+}
 
 # Set to True. If pybaseball is not installed, it safely falls back.
 USE_REAL_STATCAST = True
@@ -830,6 +837,9 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
                 slg = safe_float(stats.get("slg", 0.420), 0.420) if stats else 0.420
                 hrrate = hr_rate(stats) if stats else 0.025
 
+                watchlist_boost = 4 if player["player"] in POWER_WATCHLIST else 0
+                pwr = clamp(pwr + watchlist_boost, 35, 99)
+
                 candidates.append({
                     "player": player["player"],
                     "mlb_id": pid,
@@ -1040,7 +1050,10 @@ def build_candidate_rows(date: str, slate_type: str = "CUSTOM") -> pd.DataFrame:
 
     for _, row in out.iterrows():
         team = row.get("team", "Unknown")
-        if team_counts[team] < MAX_FINAL_PLAYERS_PER_TEAM:
+        player_name = row.get("player", "")
+        is_watchlist = player_name in POWER_WATCHLIST
+
+        if team_counts[team] < MAX_FINAL_PLAYERS_PER_TEAM or is_watchlist:
             balanced_rows.append(row)
             team_counts[team] += 1
 
