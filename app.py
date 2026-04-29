@@ -587,7 +587,7 @@ for i, (_, row) in enumerate(filtered.head(5).iterrows()):
             st.caption(f"#{i+1} TARGET • {tag}")
             st.markdown(f"### {safe(row, player_col)}")
             st.caption(f"{safe(row, team_col, 'MLB')} vs {safe(row, pitcher_col, 'Projected Starter')}")
-            st.caption(f"🕒 {game_time_full_text(row)}")
+            st.caption(f"🕒 {safe(row, game_day_col, 'TBD')} • {safe(row, game_date_display_col, 'TBD')} • {safe(row, game_time_col, 'TBD')}")
             st.metric("Real HR Probability", f"{row['_real_hr_prob']}%")
             st.write(f"**Strength:** {strength}/100")
             st.progress(int(max(0, min(100, strength))))
@@ -650,7 +650,7 @@ for _, row in display_df.iterrows():
             st.write(f"### {risk_emoji(risk)}")
 
         with c[8]:
-            st.write(f"**Game Time:** {game_time_full_text(row)}")
+            st.write(f"**Game Time:** {safe(row, game_day_col, 'TBD')} • {safe(row, game_date_display_col, 'TBD')} • {safe(row, game_time_col, 'TBD')}")
             st.write(f"**Pitcher:** {safe(row, pitcher_col, 'Projected Starter')}")
             st.write(f"**Park:** {safe(row, park_col, 'Neutral')}")
             st.write(f"**Weather:** {safe(row, weather_col, 'Neutral')}")
